@@ -4,6 +4,32 @@ from __future__ import annotations
 from typing import Any
 
 SEED_ROWS: dict[str, list[dict[str, Any]]] = {
+    # 指标落盘的初始批次：独立用户数误按订单行数写成 10（实际只有 6 个用户）。
+    # 该批次只读保留，后续由数据落盘发布更正批次，旧版本引用仍可回查。
+    "_sink_metric_batches": [{
+        "batch_id": "SINK-0001-B0001",
+        "slot_id": "SINK-0001",
+        "version": 1,
+        "batch_type": "原始批次",
+        "status": "有效",
+        "correction_key": None,
+        "correction_of": None,
+        "superseded_by": None,
+        "metrics": {
+            "METR-ORDER-COUNT": 10,
+            "METR-USER-DISTINCT": 10,
+        },
+        "values": {"order_count": 10, "distinct_users": 10},
+        "order_ids": [
+            "ORD-001", "ORD-002", "ORD-003", "ORD-004", "ORD-005",
+            "ORD-006", "ORD-007", "ORD-008", "ORD-009", "ORD-010",
+        ],
+        "user_ids": ["U1001", "U1002", "U1003", "U1004", "U1005", "U1006"],
+        "lineage": ["SINK-0001-B0001"],
+        "published_at": "2026-11-16T08:10:05Z",
+        "remark": "独立用户数误按订单行数落盘为10，待按用户ID去重更正",
+    }],
+    "_sink_metric_corrections": [],
     "source_binding": [{'id': 1,
   'status': '未绑定',
   'pending': True,

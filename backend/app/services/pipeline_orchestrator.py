@@ -14,6 +14,10 @@ from app.fixtures import (
     RULE_TRIGGERS, METRIC_DEFS, QUALITY_SAMPLES,
     PARTITION_STATS, EVENT_ROUTES,
 )
+from app.services.metric_calc import (
+    DISTINCT_USER_METRIC, ORDER_COUNT_METRIC, metric_calc_service,
+)
+from app.services.sink_writer import sink_writer_service
 from app.store import store
 
 
@@ -62,17 +66,26 @@ def run_source_cdc_pipeline() -> dict:
 
 # Pipeline 2: stream_transform -> window_agg -> metric_calc
 def run_window_metric_pipeline(window_id: str | None = None) -> dict:
-    """执行窗口聚合并计算指标。"""
+    """执行窗口聚合并计算指标。
+
+    指标取数统一走 MetricCalcService.compute_order_metrics：
+    普通订单量按订单编号去重、独立用户数按用户ID去重，两者分别计算；
+    此前独立用户数在落盘口径上被误当成订单行数（10），实际去重后只有 6 个用户。
+    """
     records = list(TRANSFORM_RECORDS)
     configs = WINDOW_CONFIGS
     if window_id:
         configs = [c for c in configs if c["窗口编号"] == window_id]
 
+    # 指标计算入口只保留一份去重口径，窗口与落盘共用同一组取数结果。
+    order_metrics = metric_calc_service.compute_order_metrics(records)
+    distinct_user_count = order_metrics["distinct_users"]
+
     results: dict[str, Any] = {"total_records": len(records)}
     for cfg in configs:
         gmv = sum(_to_float(r["金额"]) for r in records)
-        cnt = len(records)
-        users = set(r["用户ID"] for r in records)
+        cnt = order_metrics["order_count"]
+        users = set(order_metrics["user_ids"])
         channel_dist: dict[str, int] = {}
         for r in records:
             channel_dist[r["渠道"]] = channel_dist.get(r["渠道"], 0) + 1
@@ -84,19 +97,19 @@ def run_window_metric_pipeline(window_id: str | None = None) -> dict:
             "渠道分布": channel_dist,
         }
 
-    # 聚合指标
+    # 聚合指标：count/distinct 分支统一使用去重后的指标，订单与用户各自计数。
     metrics = {}
     for m in METRIC_DEFS:
         mid = m["指标编号"]
-        if "count" in m["计算公式"]:
-            metrics[mid] = len(records)
+        if mid == DISTINCT_USER_METRIC or "distinct" in m["计算公式"]:
+            metrics[mid] = distinct_user_count
+        elif mid == ORDER_COUNT_METRIC or "count" in m["计算公式"]:
+            metrics[mid] = order_metrics["order_count"]
         elif "sum" in m["计算公式"]:
             metrics[mid] = round(sum(_to_float(r["金额"]) for r in records), 2)
         elif "avg" in m["计算公式"]:
             vals = [_to_float(r["金额"]) for r in records]
             metrics[mid] = round(statistics.mean(vals), 2) if vals else 0.0
-        elif "distinct" in m["计算公式"]:
-            metrics[mid] = len(set(r["用户ID"] for r in records))
 
     results["metrics"] = metrics
     _wr("window_metric_calc", {"source": ["stream_transform", "window_agg"], "target": "metric_calc", "payload": results})
@@ -126,16 +139,26 @@ def run_rule_router_pipeline() -> dict:
 
 # Pipeline 4: metric_calc -> pipeline_orch -> sink_writer
 def run_metric_sink_pipeline() -> dict:
-    """指标结果写入下游 sink。"""
+    """指标结果写入下游 sink。
+
+    指标先按统一口径重算，再交给数据落盘服务落盘；落盘批次（含版本与更正关系）
+    以 SinkWriterService 的批次表为准，本管道结果只做编排层回执。
+    """
     # 先跑 window_metric 拿到指标
     wm = run_window_metric_pipeline()
     metrics = wm.get("metrics", {})
 
+    view = sink_writer_service.get_slot_version_view()
     sinks: list[dict] = []
     for mid, val in metrics.items():
-        sinks.append({"指标编号": mid, "值": val, "写入时间": datetime.now().isoformat(), "写入状态": "成功"})
+        sinks.append({
+            "指标编号": mid, "值": val,
+            "批次编号": view["visible_batch_id"], "版本": view["visible_version"],
+            "写入时间": datetime.now().isoformat(), "写入状态": "成功",
+        })
 
-    result = {"sink_count": len(sinks), "sinks": sinks}
+    result = {"sink_count": len(sinks), "sinks": sinks,
+              "batch_id": view["visible_batch_id"], "version": view["visible_version"]}
     _wr("metric_pipeline_sink", {"source": ["metric_calc", "pipeline_orch"], "target": "sink_writer", "payload": result})
     return result
 

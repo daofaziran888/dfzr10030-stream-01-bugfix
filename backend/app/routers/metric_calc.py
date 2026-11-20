@@ -13,7 +13,6 @@ from app.services.metric_calc import MetricCalcService
 router = APIRouter(prefix="/api/metric_calc", tags=["指标计算"])
 
 service = MetricCalcService()
-
 LIST_FIELDS = ["指标编号", "指标名称", "计算公式", "更新频率", "维度组合", "精度模式", "缓存窗口", "最后计算"]
 STATUSES = ["草稿", "计算中", "可用", "计算异常"]
 
@@ -39,6 +38,21 @@ def list_entries(
     items, total = service.list_entries(
         filters=query_filters(request), keyword=keyword, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/recompute/order-metrics")
+def recompute_order_metrics() -> dict:
+    """按订单转换记录重算落盘指标：订单量与独立用户数分别去重，可按订单标识对账。"""
+    result = service.compute_order_metrics()
+    return {
+        "ok": True,
+        "metrics": {
+            "order_count": result["order_count"],
+            "distinct_users": result["distinct_users"],
+        },
+        "order_ids": result["order_ids"],
+        "user_ids": result["user_ids"],
+    }
 
 
 @router.get("/export")
